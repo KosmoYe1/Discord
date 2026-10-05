@@ -1,0 +1,35 @@
+# Guardar como: .github/workflows/alerta.yml
+name: Alerta Supertrend US100
+
+on:
+  schedule:
+    - cron: "*/15 * * * 1-5"   # a cada 15 min, de segunda a sexta (hora UTC)
+  workflow_dispatch:            # permite correr à mão para testar
+
+permissions:
+  contents: write               # necessário para guardar o estado.json
+
+jobs:
+  verificar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install -r requirements.txt
+
+      - name: Verificar sinal
+        run: python supertrend_alerta.py
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          NTFY_TOPICO: ${{ secrets.NTFY_TOPICO }}
+
+      - name: Guardar estado (anti-repetição)
+        run: |
+          git config user.name "alerta-bot"
+          git config user.email "alerta-bot@users.noreply.github.com"
+          git add estado.json 2>/dev/null || true
+          git diff --cached --quiet || (git commit -m "atualiza estado" && git push)
