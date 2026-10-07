@@ -34,7 +34,8 @@ TICKER_PADRAO = "NQ=F"      # futuros Nasdaq 100 (quase 24h). Alternativa: "^NDX
 PERIODO_ATR = 15            # período do ATR (RMA / Wilder)
 MULTIPLICADOR = 5.0         # multiplicador do Supertrend
 INTERVALO_MIN = 15          # tamanho da vela em minutos
-IDADE_MAX_MIN = 45          # ignora sinais de velas mais antigas que isto (evita avisos tardios)
+IDADE_MAX_MIN = 120         # ignora sinais de velas mais antigas que isto (evita avisos tardios)
+N_VELAS = 4                 # quantas velas fechadas recentes são verificadas (apanha execuções atrasadas)
 FICHEIRO_ESTADO = Path("estado.json")   # guarda o último sinal enviado (anti-repetição)
 FUSO = ZoneInfo("Europe/Lisbon")        # fuso horário mostrado na mensagem
 
@@ -113,30 +114,33 @@ def supertrend(df):
     return st, c
 
 
-def detetar_sinal(df):
-    """Devolve 'COMPRA', 'VENDA' ou None, olhando só para a última vela fechada."""
+def detetar_sinais(df, n=N_VELAS):
+    """Procura sinais nas últimas n velas fechadas. Devolve lista de (sinal, inicio_vela, preco)."""
     st, c = supertrend(df)
-    if np.isnan(st[-2]) or np.isnan(st[-1]):
-        return None
-    if c[-2] <= st[-2] and c[-1] > st[-1]:   # fecho cruza para cima
-        return "COMPRA"
-    if c[-2] >= st[-2] and c[-1] < st[-1]:   # fecho cruza para baixo
-        return "VENDA"
-    return None
+    encontrados = []
+    for i in range(len(df) - n, len(df)):
+        if i < 1 or np.isnan(st[i]) or np.isnan(st[i - 1]):
+            continue
+        if c[i - 1] <= st[i - 1] and c[i] > st[i]:      # fecho cruza para cima
+            encontrados.append(("COMPRA", df.index[i], c[i]))
+        elif c[i - 1] >= st[i - 1] and c[i] < st[i]:    # fecho cruza para baixo
+            encontrados.append(("VENDA", df.index[i], c[i]))
+    return encontrados
 
 
 # ----------------------------- Estado (anti-repetição) ----------------------
 def ler_estado():
+    """Devolve a lista de sinais já enviados."""
     if FICHEIRO_ESTADO.exists():
         try:
-            return json.loads(FICHEIRO_ESTADO.read_text())
+            return json.loads(FICHEIRO_ESTADO.read_text()).get("enviados", [])
         except json.JSONDecodeError:
             pass
-    return {}
+    return []
 
 
-def guardar_estado(chave: str):
-    FICHEIRO_ESTADO.write_text(json.dumps({"ultimo_sinal": chave}))
+def guardar_estado(enviados):
+    FICHEIRO_ESTADO.write_text(json.dumps({"enviados": enviados[-20:]}))
 
 
 # ----------------------------- Notificações ---------------------------------
@@ -168,35 +172,43 @@ def enviar_notificacao(texto: str):
 # ----------------------------- Lógica principal -----------------------------
 def verificar(ticker: str):
     df = obter_dados(ticker)
-    sinal = detetar_sinal(df)
-    inicio_vela = df.index[-1]                       # início da última vela fechada
-    fim_vela = inicio_vela + timedelta(minutes=INTERVALO_MIN)
-    idade_min = (datetime.now(timezone.utc) - fim_vela).total_seconds() / 60
+    sinais = detetar_sinais(df)
+    enviados = ler_estado()
+    agora = datetime.now(timezone.utc)
+    houve_novo = False
 
-    if sinal is None:
-        print(f"[{datetime.now(FUSO):%H:%M}] Sem sinal.")
-        return
-    if idade_min > IDADE_MAX_MIN:
-        print(f"Sinal {sinal} antigo ({idade_min:.0f} min). Ignorado.")
+    if not sinais:
+        print(f"[{datetime.now(FUSO):%H:%M}] Sem sinal nas últimas {N_VELAS} velas. "
+              f"Última vela: {df.index[-1].astimezone(FUSO):%d/%m %H:%M}")
         return
 
-    chave = f"{sinal}|{inicio_vela.isoformat()}"
-    if ler_estado().get("ultimo_sinal") == chave:
-        print("Sinal já enviado antes. Ignorado.")
-        return
+    for sinal, inicio_vela, preco in sinais:
+        fim_vela = inicio_vela + timedelta(minutes=INTERVALO_MIN)
+        idade_min = (agora - fim_vela).total_seconds() / 60
+        chave = f"{sinal}|{inicio_vela.isoformat()}"
 
-    preco = df["Close"].iloc[-1]
-    hora = fim_vela.astimezone(FUSO).strftime("%d/%m/%Y %H:%M")
-    emoji = "🟢" if sinal == "COMPRA" else "🔴"
-    texto = (
-        f"{emoji} Sinal de {sinal} - US100 (15m)\n"
-        f"Preço de fecho: {preco:.2f}\n"
-        f"Hora (Lisboa): {hora}\n"
-        f"Fonte: Yahoo Finance ({ticker}), pode ter atraso."
-    )
-    enviar_notificacao(texto)
-    guardar_estado(chave)
-    print("Notificação enviada:", sinal)
+        if chave in enviados:
+            print(f"{sinal} das {fim_vela.astimezone(FUSO):%H:%M}: já enviado antes.")
+            continue
+        if idade_min > IDADE_MAX_MIN:
+            print(f"{sinal} das {fim_vela.astimezone(FUSO):%H:%M}: antigo ({idade_min:.0f} min). Ignorado.")
+            continue
+
+        hora = fim_vela.astimezone(FUSO).strftime("%d/%m/%Y %H:%M")
+        emoji = "🟢" if sinal == "COMPRA" else "🔴"
+        texto = (
+            f"{emoji} Sinal de {sinal} - US100 (15m)\n"
+            f"Preço de fecho: {preco:.2f}\n"
+            f"Hora (Lisboa): {hora}\n"
+            f"Fonte: Yahoo Finance ({ticker}), pode ter atraso."
+        )
+        enviar_notificacao(texto)
+        enviados.append(chave)
+        houve_novo = True
+        print("Notificação enviada:", sinal, hora)
+
+    if houve_novo:
+        guardar_estado(enviados)
 
 
 def dormir_ate_proxima_vela():
