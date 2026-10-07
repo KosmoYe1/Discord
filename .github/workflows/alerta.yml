@@ -22,7 +22,7 @@ jobs:
       - run: pip install -r requirements.txt
 
       - name: Verificar sinal
-        run: python supertrend_alerta.py
+        run: python supertrend_alerta.py --teste
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           NTFY_TOPICO: ${{ secrets.NTFY_TOPICO }}
